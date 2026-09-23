@@ -1,0 +1,39 @@
+<h1><%= @firing.kind.capitalize %> firing, <%= @firing.scheduled_on %></h1>
+<p>
+  <%= @firing.kiln.name %> to <%= @firing.target_temperature_c %>C
+  <span class="status"><%= @firing.status %></span>
+  <% if @firing.planned? %>
+    &middot; <%= @firing.remaining_capacity_cm3 %>cm3 of <%= @firing.kiln.capacity_cm3 %>cm3 free
+  <% end %>
+</p>
+
+<h2>Loaded</h2>
+<table>
+  <tr><th>Piece</th><th>Member</th><th>Volume</th><th>Glaze</th></tr>
+  <% @placements.each do |placement| %>
+    <tr>
+      <td><%= link_to placement.piece.title, placement.piece %></td>
+      <td><%= placement.piece.member.name %></td>
+      <td><%= placement.piece.volume_cm3 %>cm3</td>
+      <td><%= placement.piece.glaze_temperature_c %>C</td>
+    </tr>
+  <% end %>
+</table>
+
+<% if @firing.planned? %>
+  <h2>Waiting to load</h2>
+  <table>
+    <tr><th>Piece</th><th>Member</th><th>Volume</th><th>Glaze</th><th></th></tr>
+    <% @candidates.each do |piece| %>
+      <tr>
+        <td><%= piece.title %></td>
+        <td><%= piece.member.name %></td>
+        <td><%= piece.volume_cm3 %>cm3</td>
+        <td><%= piece.glaze_temperature_c %>C</td>
+        <td><%= button_to "Load", firing_placements_path(@firing, piece_id: piece.id) %></td>
+      </tr>
+    <% end %>
+  </table>
+
+  <%= button_to "Mark as fired", complete_firing_path(@firing), data: { turbo_confirm: "Mark this firing as fired?" } %>
+<% end %>

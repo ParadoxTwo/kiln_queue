@@ -1,0 +1,9 @@
+<h1>Plan a firing</h1>
+<%= form_with model: @firing do |f| %>
+  <%= render "shared/errors", record: @firing %>
+  <div><%= f.label :kiln_id %><%= f.collection_select :kiln_id, Kiln.order(:name), :id, :name %></div>
+  <div><%= f.label :kind %><%= f.select :kind, Firing::KINDS %></div>
+  <div><%= f.label :scheduled_on %><%= f.date_field :scheduled_on %></div>
+  <div><%= f.label :target_temperature_c, "Target temperature (C)" %><%= f.number_field :target_temperature_c %></div>
+  <%= f.submit "Plan firing" %>
+<% end %>

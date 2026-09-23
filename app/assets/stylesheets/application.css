@@ -1,0 +1,17 @@
+:root { --ink: #2b2522; --muted: #7a6f68; --clay: #b5653a; --line: #e6ddd6; --bg: #fbf8f5; }
+* { box-sizing: border-box; }
+body { margin: 0; font: 15px/1.5 system-ui, sans-serif; color: var(--ink); background: var(--bg); }
+header { display: flex; gap: 2rem; align-items: center; padding: .9rem 2rem; border-bottom: 1px solid var(--line); background: #fff; }
+header strong { color: var(--clay); letter-spacing: .04em; }
+nav a { margin-right: 1.2rem; color: var(--ink); text-decoration: none; }
+main { max-width: 960px; margin: 0 auto; padding: 1.5rem 2rem 4rem; }
+table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 600; font-size: .85rem; }
+.flash { padding: .6rem .9rem; border-radius: 6px; }
+.notice { background: #eaf4ea; } .alert { background: #fbeaea; }
+.status { font-size: .8rem; padding: .1rem .5rem; border-radius: 99px; background: var(--line); }
+form div { margin-bottom: .7rem; } label { display: block; font-size: .85rem; color: var(--muted); }
+input, select { padding: .35rem .5rem; border: 1px solid var(--line); border-radius: 5px; }
+button, input[type=submit] { background: var(--clay); color: #fff; border: 0; padding: .45rem .9rem; border-radius: 6px; cursor: pointer; }
+.errors { color: #9b2c2c; }

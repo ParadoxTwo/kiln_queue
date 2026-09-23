@@ -1,0 +1,9 @@
+<h1><%= @member.name %></h1>
+<p><%= @member.email %> &middot; <%= @member.tier %> &middot;
+  <%= link_to "This month's statement", monthly_statement_path(member_id: @member.id) %></p>
+<table>
+  <tr><th>Piece</th><th>Status</th></tr>
+  <% @pieces.each do |piece| %>
+    <tr><td><%= link_to piece.title, piece %></td><td><span class="status"><%= piece.status %></span></td></tr>
+  <% end %>
+</table>

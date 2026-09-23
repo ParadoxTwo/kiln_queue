@@ -1,0 +1,12 @@
+<h1>Hand in a piece</h1>
+<%= form_with model: @piece do |f| %>
+  <%= render "shared/errors", record: @piece %>
+  <div><%= f.label :member_id %><%= f.collection_select :member_id, Member.order(:name), :id, :name %></div>
+  <div><%= f.label :title %><%= f.text_field :title %></div>
+  <div><%= f.label :height_mm, "Height (mm)" %><%= f.number_field :height_mm %></div>
+  <div><%= f.label :width_mm, "Width (mm)" %><%= f.number_field :width_mm %></div>
+  <div><%= f.label :depth_mm, "Depth (mm)" %><%= f.number_field :depth_mm %></div>
+  <div><%= f.label :clay_body %><%= f.text_field :clay_body %></div>
+  <div><%= f.label :glaze_temperature_c, "Glaze maturing temperature (C)" %><%= f.number_field :glaze_temperature_c %></div>
+  <%= f.submit "Add to queue" %>
+<% end %>

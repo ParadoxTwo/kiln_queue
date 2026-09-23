@@ -1,0 +1,18 @@
+<h1>Pieces</h1>
+<p>
+  <%= link_to "Hand in a piece", new_piece_path %> &middot;
+  Filter: <%= link_to "all", pieces_path %>
+  <% Piece::STATUSES.each do |status| %> &middot; <%= link_to status, pieces_path(status: status) %><% end %>
+</p>
+<table>
+  <tr><th>Title</th><th>Member</th><th>Volume</th><th>Glaze</th><th>Status</th></tr>
+  <% @pieces.each do |piece| %>
+    <tr>
+      <td><%= link_to piece.title, piece %></td>
+      <td><%= piece.member.name %></td>
+      <td><%= piece.volume_cm3 %>cm3</td>
+      <td><%= piece.glaze_temperature_c %>C</td>
+      <td><span class="status"><%= piece.status %></span></td>
+    </tr>
+  <% end %>
+</table>

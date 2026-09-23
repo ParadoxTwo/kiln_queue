@@ -1,0 +1,23 @@
+<h1>Firings</h1>
+<p><%= link_to "Plan a firing", new_firing_path %></p>
+
+<h2>Upcoming</h2>
+<table>
+  <tr><th>Date</th><th>Kiln</th><th>Kind</th><th>Target</th></tr>
+  <% @upcoming.each do |firing| %>
+    <tr>
+      <td><%= link_to firing.scheduled_on, firing %></td>
+      <td><%= firing.kiln.name %></td>
+      <td><%= firing.kind %></td>
+      <td><%= firing.target_temperature_c %>C</td>
+    </tr>
+  <% end %>
+</table>
+
+<h2>Recently fired</h2>
+<table>
+  <tr><th>Fired</th><th>Kiln</th><th>Kind</th></tr>
+  <% @recent.each do |firing| %>
+    <tr><td><%= link_to l(firing.fired_at, format: :short), firing %></td><td><%= firing.kiln.name %></td><td><%= firing.kind %></td></tr>
+  <% end %>
+</table>

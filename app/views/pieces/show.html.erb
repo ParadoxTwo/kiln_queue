@@ -1,0 +1,8 @@
+<h1><%= @piece.title %></h1>
+<p><span class="status"><%= @piece.status %></span> &middot; <%= link_to @piece.member.name, @piece.member %></p>
+<p>
+  <%= @piece.height_mm %> x <%= @piece.width_mm %> x <%= @piece.depth_mm %>mm (<%= @piece.volume_cm3 %>cm3),
+  <%= @piece.clay_body %>, glaze matures at <%= @piece.glaze_temperature_c %>C
+</p>
+<% if @piece.bisqued? %><%= button_to "Mark as glazed", mark_glazed_piece_path(@piece), method: :patch %><% end %>
+<% if @piece.finished? %><%= button_to "Mark as collected", collect_piece_path(@piece), method: :patch %><% end %>

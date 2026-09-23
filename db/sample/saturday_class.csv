@@ -1,0 +1,6 @@
+email,name,title,height_mm,width_mm,depth_mm,clay_body,glaze_temperature_c
+priya@example.com,Priya Raman,Tea bowl,90,120,120,Stoneware,1240
+tom@example.com,Tom Nguyen,Bud vase,180,70,70,Stoneware,1240
+priya@example.com,Priya Raman,Side plate,25,210,210,Stoneware,1240
+new.student@example.com,Sam Okafor,Pinch pot,60,80,80,Earthenware,1080
+tom@example.com,Tom Nguyen,Ramen bowl,95,abc,190,Stoneware,1240
