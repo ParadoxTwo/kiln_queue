@@ -24,6 +24,16 @@ set -Eeuo pipefail
 
 APP_ROOT=$(cd "$(dirname "$0")" && pwd)
 cd "$APP_ROOT"
+
+# Git Bash, MSYS2 or Cygwin on Windows: hand over to the PowerShell version,
+# which knows how to install and run Ruby on Windows. (Inside WSL this is
+# plain Linux and carries on below.)
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "Windows detected: running script/windows/setup.ps1 (next time you can use setup.cmd)."
+    exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$APP_ROOT/script/windows/setup.ps1")" "$@"
+    ;;
+esac
 # shellcheck source=script/lib/common.sh
 . "$APP_ROOT/script/lib/common.sh"
 
@@ -150,6 +160,13 @@ load_brew() {
 step_basics() {
   CURRENT_STEP="checking git, curl and a compiler"
   step "1/8 Basics"
+
+  if grep -qi microsoft /proc/version 2>/dev/null; then
+    ok "WSL"
+    case "$APP_ROOT" in
+      /mnt/[a-z]/*) warn "The app is on the Windows drive ($APP_ROOT). Rails is much slower there under WSL; cloning it into your WSL home folder (~) fixes that." ;;
+    esac
+  fi
 
   case "$OS" in
     Darwin)

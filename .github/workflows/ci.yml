@@ -87,3 +87,18 @@ jobs:
 
       - name: Test ./setup and ./dev
         run: script/test_dev_scripts.sh
+
+  test_windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          bundler-cache: true
+
+      - name: Test setup.cmd and dev.cmd (Windows PowerShell 5.1)
+        shell: cmd
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File script\test_windows_scripts.ps1

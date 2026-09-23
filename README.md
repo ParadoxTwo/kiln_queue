@@ -20,14 +20,25 @@ The app is small, but it is built the way a production Rails app should be: vali
 
 ## Setup
 
-On macOS or Linux (on Windows, inside WSL):
+**macOS, Linux, or WSL on Windows:**
 
 ```sh
 ./setup     # installs whatever is missing, skips whatever is done; safe to rerun
 ./dev       # starts the app on http://localhost:3000
 ```
 
-`./setup` goes through eight steps and says what it did at the end:
+**Windows** (PowerShell or Command Prompt, in the app folder):
+
+```bat
+.\setup.cmd
+.\dev.cmd
+```
+
+The `.cmd` files run the PowerShell scripts in `script/windows/` without anyone having to change PowerShell's execution policy. They take the same options as `./setup` and `./dev` (`--yes`, `--port 4000`, `--help` and so on). Running `./setup` or `./dev` from Git Bash hands over to them automatically.
+
+On Windows, setup installs Ruby 3.3 with the RubyInstaller DevKit (through winget, or straight from RubyInstaller's GitHub releases if winget is missing), then the MSYS2 compiler that some gems need (`ridk install 3`, a few hundred MB). Any Ruby 3.2 or newer already on the machine is used instead. Windows gets Ruby 3.3.x rather than exactly 3.3.6, which is fine: nothing in the app depends on the patch version. When a port is busy, `dev.cmd` also recognises ports that Windows has reserved for Hyper-V, WSL or Docker (nothing is listening, but nothing can use them either) and says so.
+
+`./setup` (macOS and Linux) goes through eight steps and says what it did at the end:
 
 1. **Basics:** git, curl and a compiler (Xcode Command Line Tools on a Mac, and it offers to install Homebrew)
 2. **Ruby** from `.ruby-version`. Uses rbenv, installing it if needed, or mise or asdf if you already use one. If the build fails, it offers any Ruby 3.2+ already on the machine instead.
@@ -59,6 +70,7 @@ bin/rubocop              # rubocop-rails-omakase
 bin/brakeman --no-pager  # static security scan
 bin/ci                   # all of the above, as CI runs them
 script/test_dev_scripts.sh   # scenario tests for ./setup and ./dev
+pwsh script/test_windows_scripts.ps1   # the same for the Windows scripts
 ```
 
 Set `STAFF_PASSWORD` (and optionally `STAFF_USERNAME`, default `staff`) to put every page behind HTTP basic auth. Production sets it.
@@ -118,7 +130,7 @@ This kit rehearses a pairing session where:
 
 ### How to run it (for Ankit)
 
-1. **Host it.** Run `./setup`, then `./dev`, open the folder in VS Code and start a Live Share session. Send Edwin the link. Share the server (Live Share panel > Shared Servers, the port `./dev` printed) and a terminal with him (read/write) so he can run specs. That is the thing most likely to be awkward on the day, so it is worth rehearsing.
+1. **Host it.** Run `./setup` and `./dev` (on Windows, `.\setup.cmd` and `.\dev.cmd`), open the folder in VS Code and start a Live Share session. Send Edwin the link. Share the server (Live Share panel > Shared Servers, the port `./dev` printed) and a terminal with him (read/write) so he can run specs. That is the thing most likely to be awkward on the day, so it is worth rehearsing.
 2. **Call.** Get on Google Meet. Edwin shares his screen.
 3. **Orient (5 min).** Give him the one-paragraph pitch at the top of this README and nothing else. Watch how he finds his way round code he has not seen.
 4. **Pick one set (40-60 min).** Read the opening prompt out as written. Only move to a follow-up when he has finished or stalled on the step before. You will not get through every follow-up, and you should not try to. The interviewer notes under each set are for you: open them, he should not.

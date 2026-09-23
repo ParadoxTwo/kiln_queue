@@ -7,3 +7,11 @@ db/schema.rb linguist-generated
 vendor/* linguist-vendored
 config/credentials/*.yml.enc diff=rails_credentials
 config/credentials.yml.enc diff=rails_credentials
+
+# Scripts: shell scripts must keep LF endings even when checked out on Windows,
+# or bash (WSL, Git Bash) fails on the carriage returns. cmd files want CRLF.
+setup text eol=lf
+dev text eol=lf
+*.sh text eol=lf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

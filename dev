@@ -13,6 +13,16 @@ set -Eeuo pipefail
 
 APP_ROOT=$(cd "$(dirname "$0")" && pwd)
 cd "$APP_ROOT"
+
+# Git Bash, MSYS2 or Cygwin on Windows: hand over to the PowerShell version,
+# which knows how to install and run Ruby on Windows. (Inside WSL this is
+# plain Linux and carries on below.)
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "Windows detected: running script/windows/dev.ps1 (next time you can use dev.cmd)."
+    exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$APP_ROOT/script/windows/dev.ps1")" "$@"
+    ;;
+esac
 # shellcheck source=script/lib/common.sh
 . "$APP_ROOT/script/lib/common.sh"
 
