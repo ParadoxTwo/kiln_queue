@@ -20,14 +20,35 @@ The app is small, but it is built the way a production Rails app should be: vali
 
 ## Setup
 
-You need Ruby 3.2 or newer and SQLite 3. Nothing else: no Postgres, no Redis, no Node.
+On macOS or Linux (on Windows, inside WSL):
 
 ```sh
-# .ruby-version says 3.3.6. On another 3.2+ Ruby, edit that file (or delete it) first.
+./setup     # installs whatever is missing, skips whatever is done; safe to rerun
+./dev       # starts the app on http://localhost:3000
+```
+
+`./setup` goes through eight steps and says what it did at the end:
+
+1. **Basics:** git, curl and a compiler (Xcode Command Line Tools on a Mac, and it offers to install Homebrew)
+2. **Ruby** from `.ruby-version`. Uses rbenv, installing it if needed, or mise or asdf if you already use one. If the build fails, it offers any Ruby 3.2+ already on the machine instead.
+3. **Bundler**, the version `Gemfile.lock` was made with
+4. **Gems**, with one retry after installing build libraries
+5. **Database:** creates, migrates and seeds development, and prepares test
+6. **Sample class:** imports `db/sample/saturday_class.csv` once (the importer is not idempotent, so setup checks first)
+7. **Tests:** runs the specs
+8. **Editor:** checks VS Code has the Live Share extension
+
+It asks before anything big: installing Homebrew, anything with sudo, and editing your shell config. `./setup --yes` takes the recommended answer everywhere. `./setup --help` lists the other options (skip tests, skip the sample, reset the database, pick a Ruby manager). Logs go to `log/setup/`.
+
+`./dev` checks the gems and database are up to date, then checks the port. If something is already listening there, it tells you what it is (name, pid, command, folder) and lets you **stop it**, **move to the next free port**, or **choose a port**. Whatever port you move to is checked the same way. It also clears a stale `tmp/pids/server.pid` and notices when Kiln Queue is already running from another terminal. `./dev --port 4000` starts somewhere else, `./dev --auto` skips busy ports without asking, and `./dev --help` shows the rest.
+
+Doing it by hand instead needs Ruby 3.2+ and nothing else (no Postgres, Redis or Node):
+
+```sh
 bundle install
-bin/rails db:setup                                     # create, migrate, seed
-bin/rails "kiln:import[db/sample/saturday_class.csv]"  # optional: last Saturday's class
-bin/rails server                                       # http://localhost:3000
+bin/rails db:setup
+bin/rails "kiln:import[db/sample/saturday_class.csv]"
+bin/rails server
 ```
 
 Run the checks:
@@ -37,6 +58,7 @@ bundle exec rspec        # 56 examples
 bin/rubocop              # rubocop-rails-omakase
 bin/brakeman --no-pager  # static security scan
 bin/ci                   # all of the above, as CI runs them
+script/test_dev_scripts.sh   # scenario tests for ./setup and ./dev
 ```
 
 Set `STAFF_PASSWORD` (and optionally `STAFF_USERNAME`, default `staff`) to put every page behind HTTP basic auth. Production sets it.
@@ -96,7 +118,7 @@ This kit rehearses a pairing session where:
 
 ### How to run it (for Ankit)
 
-1. **Host it.** Clone and set up the app on your machine, check `bundle exec rspec` is green, open the folder in VS Code and start a Live Share session. Send Edwin the link. Share a terminal with him (read/write) so he can run specs. That is the thing most likely to be awkward on the day, so it is worth rehearsing.
+1. **Host it.** Run `./setup`, then `./dev`, open the folder in VS Code and start a Live Share session. Send Edwin the link. Share the server (Live Share panel > Shared Servers, the port `./dev` printed) and a terminal with him (read/write) so he can run specs. That is the thing most likely to be awkward on the day, so it is worth rehearsing.
 2. **Call.** Get on Google Meet. Edwin shares his screen.
 3. **Orient (5 min).** Give him the one-paragraph pitch at the top of this README and nothing else. Watch how he finds his way round code he has not seen.
 4. **Pick one set (40-60 min).** Read the opening prompt out as written. Only move to a follow-up when he has finished or stalled on the step before. You will not get through every follow-up, and you should not try to. The interviewer notes under each set are for you: open them, he should not.

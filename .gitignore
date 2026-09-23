@@ -33,3 +33,6 @@
 # Ignore key files for decrypting credentials and more.
 /config/*.key
 
+
+# Gems, when ./setup has to install them inside the app
+/vendor/bundle

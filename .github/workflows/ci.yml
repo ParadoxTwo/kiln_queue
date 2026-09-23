@@ -84,3 +84,6 @@ jobs:
 
       - name: Run specs
         run: bundle exec rspec
+
+      - name: Test ./setup and ./dev
+        run: script/test_dev_scripts.sh

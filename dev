@@ -1,0 +1,334 @@
+#!/usr/bin/env bash
+# Starts Kiln Queue's development server.
+#
+# Before starting it checks that the port is free. If something is already
+# listening, it tells you what it is and lets you stop it, move to the next
+# free port or pick one yourself. Whatever port you end up on is checked the
+# same way.
+#
+#   ./dev                 start on port 3000 (or $PORT)
+#   ./dev --port 4000     start on 4000
+#   ./dev --help          all options
+set -Eeuo pipefail
+
+APP_ROOT=$(cd "$(dirname "$0")" && pwd)
+cd "$APP_ROOT"
+# shellcheck source=script/lib/common.sh
+. "$APP_ROOT/script/lib/common.sh"
+
+PORT_WANTED=${PORT:-3000}
+BIND=""
+AUTO=0
+DRY_RUN=0
+PIDFILE="$APP_ROOT/tmp/pids/server.pid"
+
+usage() {
+  cat <<'EOF'
+Usage: ./dev [options]
+
+  -p, --port PORT   Port to start on (default: $PORT, or 3000)
+  -b, --bind ADDR   Address to listen on (default: Rails' own, localhost).
+                    Use 0.0.0.0 to reach the app from another device.
+      --auto        If the port is busy, move to the next free one without
+                    asking. Also what happens when there is no terminal to ask.
+      --dry-run     Check the port and print the server command, but do not
+                    check gems or the database and do not start the server.
+  -h, --help        Show this help
+
+If the port is in use you can:
+  k  stop the process using it (asks before force-killing)
+  n  move to the next free port
+  c  choose a port yourself (checked the same way)
+  s  look the process up with sudo, when it belongs to another user
+  q  quit and leave everything as it is
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -p|--port) [ $# -ge 2 ] || die "--port needs a number"; PORT_WANTED=$2; shift 2 ;;
+    --port=*) PORT_WANTED=${1#*=}; shift ;;
+    -b|--bind) [ $# -ge 2 ] || die "--bind needs an address"; BIND=$2; shift 2 ;;
+    --bind=*) BIND=${1#*=}; shift ;;
+    --auto) AUTO=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) err "Unknown option: $1"; usage >&2; exit 2 ;;
+  esac
+done
+
+valid_port() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+valid_port "$PORT_WANTED" || die "'$PORT_WANTED' is not a port number (1-65535)."
+
+# ---- what is listening on a port ------------------------------------------
+
+# Prints the pids listening on PORT, one per line. Empty when none are visible.
+# Without sudo, lsof only sees your own processes; port_in_use covers the rest.
+listener_pids() {
+  local port=$1
+  if has lsof; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | sort -u || true
+  elif has ss; then
+    ss -Hltnp "sport = :$port" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u || true
+  elif has fuser; then
+    fuser -n tcp "$port" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' || true
+  fi
+}
+
+# True if anything at all accepts connections on PORT, even a process we are
+# not allowed to see.
+port_in_use() {
+  local port=$1
+  [ -n "$(listener_pids "$port")" ] && return 0
+  (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null && return 0
+  return 1
+}
+
+next_free_port() {
+  local port=$(( $1 + 1 )) last=$(( $1 + 100 ))
+  while [ "$port" -le "$last" ] && [ "$port" -le 65535 ]; do
+    port_in_use "$port" || { echo "$port"; return 0; }
+    port=$(( port + 1 ))
+  done
+  return 1
+}
+
+process_name() { basename "$(ps -o comm= -p "$1" 2>/dev/null | sed 's/^ *//')" 2>/dev/null || echo "unknown"; }
+
+describe_pid() {
+  local pid=$1 name user args cwd
+  name=$(process_name "$pid")
+  user=$(ps -o user= -p "$pid" 2>/dev/null | tr -d ' ')
+  args=$(ps -o args= -p "$pid" 2>/dev/null | cut -c1-110)
+  cwd=""
+  has lsof && cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
+  printf '    %s%s%s  pid %s  user %s\n' "$C_BOLD" "$name" "$C_RESET" "$pid" "${user:-?}"
+  [ -n "$args" ] && dim "command: $args"
+  [ -n "$cwd" ] && dim "folder:  $cwd"
+  if [ "$cwd" = "$APP_ROOT" ] && printf '%s' "$name $args" | grep -Eq 'ruby|puma|rails'; then
+    dim "(this is Kiln Queue itself, probably from another terminal)"
+  fi
+}
+
+# Running, and not a zombie waiting to be reaped.
+pid_alive() {
+  local stat
+  stat=$(ps -o stat= -p "$1" 2>/dev/null) || return 1
+  case "$stat" in *Z*) return 1 ;; esac
+}
+
+# Stops each pid: SIGTERM first, then asks before SIGKILL. Uses sudo only when
+# asked to.
+stop_pids() {
+  local port=$1; shift
+  local pid name waited
+  for pid in "$@"; do
+    name=$(process_name "$pid")
+    info "Stopping $name (pid $pid)..."
+    if ! kill -TERM "$pid" 2>/dev/null; then
+      if pid_alive "$pid"; then
+        warn "Not allowed to stop pid $pid: it belongs to another user."
+        if ask_yn "Stop it with sudo?" n; then
+          sudo kill -TERM "$pid" || { err "sudo kill failed."; continue; }
+        else
+          continue
+        fi
+      fi
+    fi
+  done
+
+  waited=0
+  while port_in_use "$port" && [ "$waited" -lt 25 ]; do
+    sleep 0.2; waited=$(( waited + 1 ))
+  done
+
+  if port_in_use "$port"; then
+    warn "Port $port is still in use after 5 seconds."
+    local still
+    still=$(listener_pids "$port" | tr '\n' ' ')
+    if [ -n "$still" ] && ask_yn "Force it to stop (SIGKILL: no chance to clean up)?" n; then
+      for pid in $still; do
+        kill -KILL "$pid" 2>/dev/null || sudo kill -KILL "$pid" || true
+      done
+      sleep 0.5
+    fi
+  fi
+  if port_in_use "$port"; then
+    warn "Port $port is still busy."
+  else
+    ok "Port $port is free now."
+  fi
+}
+
+# ---- a server this app already started -----------------------------------
+
+check_pidfile() {
+  [ -f "$PIDFILE" ] || return 0
+  local pid
+  pid=$(tr -dc '0-9' < "$PIDFILE")
+  if [ -z "$pid" ] || ! pid_alive "$pid"; then
+    rm -f "$PIDFILE"
+    ok "Removed a stale tmp/pids/server.pid left by a server that did not shut down cleanly."
+    return 0
+  fi
+
+  step "Kiln Queue is already running"
+  describe_pid "$pid"
+  info "Rails will not start a second server from the same folder while it runs."
+  if ask_yn "Stop it and start a fresh one?" y; then
+    kill -TERM "$pid" 2>/dev/null || true
+    local waited=0
+    while pid_alive "$pid" && [ "$waited" -lt 25 ]; do sleep 0.2; waited=$(( waited + 1 )); done
+    pid_alive "$pid" && die "It did not stop. Try: kill -9 $pid"
+    rm -f "$PIDFILE"
+    ok "Stopped."
+  else
+    info "Leaving it running."
+    exit 0
+  fi
+}
+
+# ---- choosing the port ----------------------------------------------------
+
+choose_port() {
+  local port=$1 pids choice next custom first_pid
+  while port_in_use "$port"; do
+    step "Port $port is already in use"
+    pids=$(listener_pids "$port" | tr '\n' ' ')
+    if [ -n "$pids" ]; then
+      for pid in $pids; do describe_pid "$pid"; done
+    else
+      warn "Something is listening, but it belongs to another user, so its name is hidden."
+    fi
+
+    next=$(next_free_port "$port" || true)
+
+    if [ "$AUTO" = 1 ] || ! interactive; then
+      [ "$AUTO" = 1 ] || die "No terminal to ask in. Free port $port, pass --port, or use --auto to take the next free one."
+      [ -n "$next" ] || die "No free port found between $((port + 1)) and $((port + 100))."
+      info "--auto: moving to port $next."
+      port=$next
+      continue
+    fi
+
+    first_pid=${pids%% *}
+    echo
+    if [ -n "$pids" ]; then
+      info "[k] Stop $(process_name "$first_pid") (pid ${pids% })"
+    else
+      info "[s] Look it up with sudo"
+    fi
+    [ -n "$next" ] && info "[n] Use the next free port ($next)"
+    info "[c] Choose another port"
+    info "[q] Quit and leave it running"
+    printf '    %s?%s Your choice: ' "$C_BOLD" "$C_RESET"
+    IFS= read -r choice || choice=q
+
+    case "$choice" in
+      k|K)
+        if [ -n "$pids" ]; then
+          # shellcheck disable=SC2086 # word splitting is the point here
+          stop_pids "$port" $pids
+        else
+          info "Nothing visible to stop. Use [s] first."
+        fi
+        ;;
+      s|S)
+        if has lsof; then
+          sudo lsof -nP -iTCP:"$port" -sTCP:LISTEN || true
+          local root_pids
+          root_pids=$(sudo lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | sort -u | tr '\n' ' ')
+          if [ -n "$root_pids" ] && ask_yn "Stop it with sudo?" n; then
+            # shellcheck disable=SC2086
+            sudo kill -TERM $root_pids || true
+            sleep 1
+          fi
+        else
+          warn "lsof is not installed, so there is no way to look it up here."
+        fi
+        ;;
+      n|N)
+        if [ -n "$next" ]; then port=$next; else warn "No free port nearby. Choose one with [c]."; fi
+        ;;
+      c|C)
+        while true; do
+          printf '    %s?%s Port (1024-65535): ' "$C_BOLD" "$C_RESET"
+          IFS= read -r custom || die "No port given."
+          if ! valid_port "$custom"; then
+            warn "'$custom' is not a port number."
+            continue
+          fi
+          if [ "$custom" -lt 1024 ] && ! ask_yn "Ports below 1024 need root on most systems. Use $custom anyway?" n; then
+            continue
+          fi
+          port=$custom
+          break
+        done
+        ;;
+      q|Q|"")
+        info "Quitting. Nothing was changed."
+        exit 1
+        ;;
+      *)
+        warn "Please type one of the letters in brackets."
+        ;;
+    esac
+  done
+  CHOSEN_PORT=$port
+}
+
+# ---- app checks -----------------------------------------------------------
+
+check_app() {
+  step "Checking the app"
+  if ! load_ruby_choice; then
+    warn "./setup has not been run on this machine yet."
+    if ask_yn "Run ./setup now?" y; then
+      "$APP_ROOT/setup" || die "./setup failed. Fix what it reported and run ./dev again."
+      load_ruby_choice || die "./setup did not record a Ruby. Run it again and check its output."
+    else
+      die "Run ./setup first."
+    fi
+  fi
+  ok "Ruby $(rb ruby -e 'print RUBY_VERSION') ($KILN_RUBY_MANAGER)"
+
+  if ! rb bundle check >/dev/null 2>&1; then
+    warn "Some gems are missing (the Gemfile probably changed)."
+    ask_yn "Run bundle install now?" y || die "Run bundle install, then ./dev again."
+    rb bundle install
+  fi
+  ok "Gems installed"
+
+  local out
+  if ! out=$(rb bin/rails db:prepare 2>&1); then
+    printf '%s\n' "$out" | tail -20 >&2
+    die "Could not prepare the database. See the error above."
+  fi
+  ok "Database ready"
+}
+
+# ---- go ---------------------------------------------------------------------
+
+[ "$DRY_RUN" = 1 ] || check_app
+check_pidfile
+CHOSEN_PORT=$PORT_WANTED
+choose_port "$PORT_WANTED"
+
+set -- bin/rails server -p "$CHOSEN_PORT"
+[ -n "$BIND" ] && set -- "$@" -b "$BIND"
+
+step "Starting Kiln Queue on port $CHOSEN_PORT"
+info "Open http://localhost:$CHOSEN_PORT"
+info "Live Share: in the Live Share panel, Shared Servers > Share server > $CHOSEN_PORT,"
+info "so your guest can open the app too."
+info "Stop the server with Ctrl-C."
+
+if [ "$DRY_RUN" = 1 ]; then
+  info "Dry run, would now run: $*"
+  exit 0
+fi
+
+rb_exec "$@"

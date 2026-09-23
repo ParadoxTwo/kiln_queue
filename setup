@@ -1,0 +1,706 @@
+#!/usr/bin/env bash
+# One-shot setup for Kiln Queue on macOS or Linux (including WSL).
+#
+# Installs what is missing and skips what is already done, so it is safe to
+# run again at any time: after a failure, after pulling changes, or just to
+# check everything is in place.
+#
+#   ./setup            ask before anything big (Homebrew, sudo, editing your shell config)
+#   ./setup --yes      take the recommended answer everywhere
+#   ./setup --help     all options
+#
+# What it does, in order:
+#   1. basics      git, curl and a C compiler (Xcode Command Line Tools on a Mac)
+#   2. Ruby        the version in .ruby-version, through rbenv (installed if
+#                  needed), or through mise or asdf if you already use one.
+#                  Falls back to another Ruby 3.2+ you already have.
+#   3. Bundler     the version Gemfile.lock was made with
+#   4. gems        bundle install
+#   5. database    create, migrate and seed development; prepare test
+#   6. sample      import last Saturday's class (once)
+#   7. tests       run the spec suite
+#   8. editor      VS Code Live Share extension, if VS Code is installed
+set -Eeuo pipefail
+
+APP_ROOT=$(cd "$(dirname "$0")" && pwd)
+cd "$APP_ROOT"
+# shellcheck source=script/lib/common.sh
+. "$APP_ROOT/script/lib/common.sh"
+
+ASSUME_YES=0
+SKIP_TESTS=0
+NO_SAMPLE=0
+NO_EDITOR=0
+RESET_DB=0
+FORCE_MANAGER=""
+MIN_RUBY="3.2"
+LOG_DIR="$APP_ROOT/log/setup"
+OS=$(uname -s)
+CURRENT_STEP="starting"
+SUMMARY=""
+
+usage() {
+  cat <<'EOF'
+Usage: ./setup [options]
+
+  -y, --yes                Take the recommended answer to every question
+      --skip-tests         Do not run the spec suite at the end
+      --no-sample          Do not import the sample Saturday class
+      --no-editor          Do not check VS Code or the Live Share extension
+      --reset-db           Drop and rebuild the development database from seeds
+      --ruby-manager NAME  Use rbenv, mise, asdf or path (the ruby already on
+                           your PATH) instead of letting setup pick
+  -h, --help               Show this help
+
+Safe to run as many times as you like. Logs go to log/setup/.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -y|--yes) ASSUME_YES=1; shift ;;
+    --skip-tests) SKIP_TESTS=1; shift ;;
+    --no-sample) NO_SAMPLE=1; shift ;;
+    --no-editor) NO_EDITOR=1; shift ;;
+    --reset-db) RESET_DB=1; shift ;;
+    --ruby-manager) [ $# -ge 2 ] || die "--ruby-manager needs a name"; FORCE_MANAGER=$2; shift 2 ;;
+    --ruby-manager=*) FORCE_MANAGER=${1#*=}; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) err "Unknown option: $1"; usage >&2; exit 2 ;;
+  esac
+done
+export ASSUME_YES
+
+case "$FORCE_MANAGER" in ""|rbenv|mise|asdf|path) ;; *) die "--ruby-manager must be rbenv, mise, asdf or path." ;; esac
+
+on_error() {
+  local status=$1 line=$2
+  echo
+  err "Setup stopped while: $CURRENT_STEP (line $line, exit $status)."
+  info "Fix what the output above points at, then run ./setup again."
+  info "It skips everything that is already done."
+  [ -d "$LOG_DIR" ] && info "Logs: log/setup/"
+}
+trap 'on_error $? $LINENO' ERR
+
+done_note() { SUMMARY="$SUMMARY
+    - $*"; }
+
+mkdir -p "$LOG_DIR"
+
+# Runs a command, keeping its output in a log. Shows the tail if it fails.
+logged() { # logged NAME command...
+  local name=$1; shift
+  local log="$LOG_DIR/$name.log" status=0
+  "$@" >"$log" 2>&1 || status=$?
+  [ "$status" = 0 ] && return 0
+  echo
+  tail -25 "$log" | sed 's/^/    | /' >&2
+  err "'$*' failed. Full log: log/setup/$name.log"
+  return "$status"
+}
+
+# ---- package managers -----------------------------------------------------
+
+LINUX_PM=""
+if [ "$OS" = Linux ]; then
+  for pm in apt-get dnf yum pacman zypper; do
+    has "$pm" && { LINUX_PM=$pm; break; }
+  done
+fi
+
+sudo_prefix() { if [ "$(id -u)" = 0 ]; then echo ""; else echo "sudo"; fi; }
+
+linux_install() { # linux_install pkg...
+  [ -n "$LINUX_PM" ] || { warn "No package manager I know (apt, dnf, yum, pacman, zypper). Install these yourself: $*"; return 1; }
+  local sudo
+  sudo=$(sudo_prefix)
+  ask_yn "Install $* with $LINUX_PM${sudo:+ (needs sudo)}?" y || return 1
+  case "$LINUX_PM" in
+    apt-get) $sudo apt-get update -qq && $sudo apt-get install -y -qq "$@" ;;
+    dnf|yum) $sudo "$LINUX_PM" install -y "$@" ;;
+    pacman) $sudo pacman -S --needed --noconfirm "$@" ;;
+    zypper) $sudo zypper install -y "$@" ;;
+  esac
+}
+
+linux_has_pkg() {
+  case "$LINUX_PM" in
+    apt-get) dpkg -s "$1" >/dev/null 2>&1 ;;
+    dnf|yum|zypper) rpm -q "$1" >/dev/null 2>&1 ;;
+    pacman) pacman -Q "$1" >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+
+load_brew() {
+  has brew && return 0
+  local candidate
+  for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew /home/linuxbrew/.linuxbrew/bin/brew; do
+    if [ -x "$candidate" ]; then
+      eval "$("$candidate" shellenv)"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# ---- 1. basics ------------------------------------------------------------
+
+step_basics() {
+  CURRENT_STEP="checking git, curl and a compiler"
+  step "1/8 Basics"
+
+  case "$OS" in
+    Darwin)
+      if xcode-select -p >/dev/null 2>&1; then
+        ok "Xcode Command Line Tools"
+      else
+        warn "Xcode Command Line Tools are missing. They provide git and the compiler Ruby needs."
+        xcode-select --install >/dev/null 2>&1 || true
+        if interactive && [ "$ASSUME_YES" = 0 ]; then
+          info "A window should have opened. Finish that install, then press Enter here."
+          read -r _ || true
+        else
+          die "Install them with: xcode-select --install, then run ./setup again."
+        fi
+        xcode-select -p >/dev/null 2>&1 || die "Still not installed. Run xcode-select --install, then ./setup again."
+        ok "Xcode Command Line Tools"
+      fi
+
+      if load_brew; then
+        ok "Homebrew"
+      else
+        warn "Homebrew is not installed. It is the easiest way to get rbenv and the libraries Ruby builds against."
+        if ask_yn "Install Homebrew now (official installer, asks for your password)?" y; then
+          if [ "$ASSUME_YES" = 1 ]; then export NONINTERACTIVE=1; fi
+          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+          load_brew || die "Homebrew installed but brew is not on PATH. Open a new terminal and run ./setup again."
+          ok "Homebrew"
+          done_note "installed Homebrew"
+        else
+          warn "Carrying on without Homebrew: rbenv will come from git, and Ruby will build its own OpenSSL (slower)."
+        fi
+      fi
+      ;;
+    Linux)
+      local missing="" tool
+      for tool in git curl make gcc; do has "$tool" || missing="$missing $tool"; done
+      if [ -n "$missing" ]; then
+        warn "Missing:$missing"
+        case "$LINUX_PM" in
+          apt-get) linux_install git curl build-essential ;;
+          dnf|yum) linux_install git curl make gcc ;;
+          pacman) linux_install git curl base-devel ;;
+          zypper) linux_install git curl make gcc ;;
+          *) false ;;
+        esac || die "Install git, curl, make and gcc, then run ./setup again."
+      fi
+      ok "git, curl, make, gcc"
+      ;;
+    *)
+      warn "$OS is not something this script knows. Trying anyway; on Windows, run it inside WSL."
+      ;;
+  esac
+  has git || die "git is missing."
+  has curl || die "curl is missing."
+}
+
+# Libraries Ruby compiles against. Only needed when Ruby is being built.
+ensure_ruby_build_deps() {
+  CURRENT_STEP="installing the libraries Ruby is built against"
+  case "$OS" in
+    Darwin)
+      load_brew || { warn "No Homebrew: ruby-build will try to build OpenSSL itself. If Ruby fails to build, install Homebrew and rerun."; return 0; }
+      local missing="" pkg
+      for pkg in openssl@3 libyaml gmp; do
+        brew list --versions "$pkg" >/dev/null 2>&1 || missing="$missing $pkg"
+      done
+      if [ -n "$missing" ]; then
+        info "Installing with Homebrew:$missing"
+        # shellcheck disable=SC2086
+        logged brew-deps brew install $missing
+        done_note "installed$missing with Homebrew"
+      fi
+      ok "openssl@3, libyaml, gmp"
+      ;;
+    Linux)
+      local pkgs="" pkg
+      case "$LINUX_PM" in
+        apt-get) pkgs="build-essential libssl-dev libyaml-dev zlib1g-dev libffi-dev libgmp-dev libreadline-dev libsqlite3-dev" ;;
+        dnf|yum) pkgs="gcc make openssl-devel libyaml-devel zlib-devel libffi-devel gmp-devel readline-devel sqlite-devel" ;;
+        pacman) pkgs="base-devel openssl libyaml zlib libffi gmp readline sqlite" ;;
+        zypper) pkgs="gcc make libopenssl-devel libyaml-devel zlib-devel libffi-devel gmp-devel readline-devel sqlite3-devel" ;;
+      esac
+      local missing=""
+      for pkg in $pkgs; do linux_has_pkg "$pkg" || missing="$missing $pkg"; done
+      if [ -n "$missing" ]; then
+        # shellcheck disable=SC2086
+        linux_install $missing || warn "Carrying on without:$missing. The Ruby build may fail."
+      fi
+      ok "Ruby build libraries"
+      ;;
+  esac
+}
+
+# ---- 2. Ruby --------------------------------------------------------------
+
+REQ_RUBY=$(required_ruby)
+
+ruby_version_of() { "$@" -e 'print RUBY_VERSION' 2>/dev/null; }
+
+# ruby_meets_minimum VERSION
+ruby_meets_minimum() {
+  local lowest
+  lowest=$(printf '%s\n%s\n' "$MIN_RUBY" "$1" | sort -t. -k1,1n -k2,2n -k3,3n | head -1)
+  [ "$lowest" = "$MIN_RUBY" ]
+}
+
+add_rbenv_to_shell() {
+  local rbenv_bin=$1 shell_name rc line_path="" line_init
+  shell_name=$(basename "${SHELL:-bash}")
+  case "$rbenv_bin" in
+    "${RBENV_ROOT:-$HOME/.rbenv}"/bin/*) line_path="export PATH=\"$(dirname "$rbenv_bin"):\$PATH\"" ;;
+  esac
+  # The init lines are written to the rc file literally, to expand there.
+  # shellcheck disable=SC2016
+  case "$shell_name" in
+    zsh) rc="$HOME/.zshrc"; line_init='eval "$(rbenv init - zsh)"' ;;
+    bash)
+      if [ "$OS" = Darwin ]; then rc="$HOME/.bash_profile"; else rc="$HOME/.bashrc"; fi
+      line_init='eval "$(rbenv init - bash)"' ;;
+    fish)
+      rc="$HOME/.config/fish/config.fish"
+      line_path=""
+      case "$rbenv_bin" in "${RBENV_ROOT:-$HOME/.rbenv}"/bin/*) line_path="fish_add_path $(dirname "$rbenv_bin")" ;; esac
+      line_init='status --is-interactive; and rbenv init - fish | source' ;;
+    *)
+      warn "Not sure how to set up rbenv for $shell_name. Add rbenv to your shell yourself: https://github.com/rbenv/rbenv#basic-git-checkout"
+      return 0 ;;
+  esac
+
+  if [ -f "$rc" ] && grep -q 'rbenv init' "$rc"; then
+    ok "rbenv already loads in new terminals ($rc)"
+    return 0
+  fi
+  if ask_yn "Add rbenv to $rc so new terminals use it?" y; then
+    mkdir -p "$(dirname "$rc")"
+    {
+      printf '\n# rbenv (added by Kiln Queue ./setup)\n'
+      [ -n "$line_path" ] && printf '%s\n' "$line_path"
+      printf '%s\n' "$line_init"
+    } >> "$rc"
+    ok "Added rbenv to $rc"
+    done_note "added rbenv to $rc (open a new terminal to pick it up)"
+  else
+    warn "Skipped. ./dev still works, but ruby -v in a new terminal may not show $REQ_RUBY."
+  fi
+}
+
+ensure_rbenv() {
+  CURRENT_STEP="installing rbenv"
+  local rbenv_bin
+  if rbenv_bin=$(find_rbenv); then
+    ok "rbenv ($rbenv_bin)"
+  elif [ "$OS" = Darwin ] && load_brew; then
+    info "Installing rbenv and ruby-build with Homebrew..."
+    logged brew-rbenv brew install rbenv ruby-build
+    rbenv_bin=$(find_rbenv) || die "rbenv did not install."
+    ok "rbenv installed"
+    done_note "installed rbenv with Homebrew"
+  else
+    local root=${RBENV_ROOT:-$HOME/.rbenv}
+    info "Installing rbenv and ruby-build from GitHub into $root..."
+    [ -d "$root/.git" ] || logged git-rbenv git clone --depth 1 https://github.com/rbenv/rbenv.git "$root"
+    [ -d "$root/plugins/ruby-build/.git" ] || logged git-ruby-build git clone --depth 1 https://github.com/rbenv/ruby-build.git "$root/plugins/ruby-build"
+    rbenv_bin="$root/bin/rbenv"
+    ok "rbenv installed"
+    done_note "installed rbenv into $root"
+  fi
+  PATH="$(dirname "$rbenv_bin"):$PATH"
+  export PATH
+  eval "$("$rbenv_bin" init - bash)"
+  add_rbenv_to_shell "$rbenv_bin"
+}
+
+ruby_build_knows() { rbenv install --list-all 2>/dev/null | grep -qx "$1"; }
+
+update_ruby_build() {
+  CURRENT_STEP="updating ruby-build"
+  info "ruby-build does not know Ruby $REQ_RUBY yet. Updating it..."
+  if load_brew && brew list --versions ruby-build >/dev/null 2>&1; then
+    logged brew-ruby-build brew upgrade ruby-build || true
+  fi
+  local plugin
+  plugin="$(rbenv root)/plugins/ruby-build"
+  if [ -d "$plugin/.git" ]; then
+    logged git-ruby-build-pull git -C "$plugin" pull --ff-only || true
+  fi
+}
+
+install_ruby_rbenv() { # install_ruby_rbenv VERSION
+  local version=$1
+  ensure_rbenv
+  if rbenv versions --bare 2>/dev/null | grep -qx "$version"; then
+    ok "Ruby $version already installed (rbenv)"
+    return 0
+  fi
+  ruby_build_knows "$version" || update_ruby_build
+  ruby_build_knows "$version" || { err "ruby-build still does not know Ruby $version."; return 1; }
+  ensure_ruby_build_deps
+  CURRENT_STEP="building Ruby $version"
+  info "Building Ruby $version. This usually takes 5-10 minutes; the log is log/setup/ruby-install.log."
+  if [ "$OS" = Darwin ] && load_brew; then
+    local openssl_dir libyaml_dir
+    openssl_dir=$(brew --prefix openssl@3)
+    libyaml_dir=$(brew --prefix libyaml)
+    RUBY_CONFIGURE_OPTS="${RUBY_CONFIGURE_OPTS:-} --with-openssl-dir=$openssl_dir --with-libyaml-dir=$libyaml_dir"
+    export RUBY_CONFIGURE_OPTS
+  fi
+  logged ruby-install rbenv install --skip-existing "$version" || return 1
+  ok "Ruby $version installed (rbenv)"
+  done_note "installed Ruby $version with rbenv"
+}
+
+install_ruby_mise() {
+  local version=$1
+  if mise where "ruby@$version" >/dev/null 2>&1; then
+    ok "Ruby $version already installed (mise)"
+    return 0
+  fi
+  ensure_ruby_build_deps
+  CURRENT_STEP="building Ruby $version with mise"
+  info "Installing Ruby $version with mise. This can take 5-10 minutes."
+  logged ruby-install mise install "ruby@$version" || return 1
+  ok "Ruby $version installed (mise)"
+  done_note "installed Ruby $version with mise"
+}
+
+install_ruby_asdf() {
+  local version=$1
+  asdf plugin list 2>/dev/null | grep -qx ruby || logged asdf-plugin asdf plugin add ruby
+  if asdf where ruby "$version" >/dev/null 2>&1; then
+    ok "Ruby $version already installed (asdf)"
+    return 0
+  fi
+  ensure_ruby_build_deps
+  CURRENT_STEP="building Ruby $version with asdf"
+  info "Installing Ruby $version with asdf. This can take 5-10 minutes."
+  logged ruby-install asdf install ruby "$version" || return 1
+  ok "Ruby $version installed (asdf)"
+  done_note "installed Ruby $version with asdf"
+}
+
+# Other Rubies on this machine that are new enough, as "manager version" lines.
+other_rubies() {
+  local v
+  local rbenv_bin
+  if rbenv_bin=$(find_rbenv); then
+    for v in $("$rbenv_bin" versions --bare 2>/dev/null); do
+      ruby_meets_minimum "$v" && echo "rbenv $v"
+    done
+  fi
+  if has ruby; then
+    v=$(ruby_version_of ruby || true)
+    [ -n "$v" ] && ruby_meets_minimum "$v" && echo "path $v"
+  fi
+  return 0
+}
+
+# When the wanted Ruby cannot be installed: retry, or use one we already have.
+ruby_fallback() {
+  local manager=$1 candidates choice picked_manager picked_version
+  warn "Could not install Ruby $REQ_RUBY with $manager."
+  candidates=$(other_rubies | sort -u)
+  if [ -n "$candidates" ]; then
+    info "Ruby $MIN_RUBY or newer is enough for this app. Already on this machine:"
+    printf '%s\n' "$candidates" | awk '{ printf "      %d) Ruby %s (%s)\n", NR, $2, $1 }'
+  fi
+  if ! interactive || [ "$ASSUME_YES" = 1 ]; then
+    [ -n "$candidates" ] || die "No other Ruby $MIN_RUBY+ found. Check log/setup/ruby-install.log."
+    choice=1
+    info "Using option 1 (automatic)."
+  else
+    info "      r) Try installing $REQ_RUBY again"
+    info "      q) Stop here"
+    printf '    %s?%s Your choice: ' "$C_BOLD" "$C_RESET"
+    IFS= read -r choice || choice=q
+  fi
+  case "$choice" in
+    r|R) return 2 ;;
+    q|Q|"") die "Stopped. See log/setup/ruby-install.log for why the build failed." ;;
+  esac
+  picked_manager=$(printf '%s\n' "$candidates" | sed -n "${choice}p" | cut -d' ' -f1)
+  picked_version=$(printf '%s\n' "$candidates" | sed -n "${choice}p" | cut -d' ' -f2)
+  [ -n "$picked_version" ] || die "'$choice' is not one of the options."
+  if [ "$picked_manager" = rbenv ]; then ensure_rbenv; fi
+  KILN_RUBY_MANAGER=$picked_manager
+  KILN_RUBY_VERSION=$picked_version
+  KILN_RUBY_DIR=""
+  if [ "$picked_manager" = path ]; then KILN_RUBY_DIR=$(ruby -e 'print RbConfig::CONFIG["bindir"]'); fi
+  if ask_yn "Update .ruby-version to $picked_version so every tool picks the same Ruby? (git will show it as a change)" y; then
+    printf '%s\n' "$picked_version" > "$APP_ROOT/.ruby-version"
+    done_note "changed .ruby-version to $picked_version"
+  fi
+}
+
+pick_manager() {
+  if [ -n "$FORCE_MANAGER" ]; then echo "$FORCE_MANAGER"; return; fi
+  if [ "$(ruby_version_of ruby || true)" = "$REQ_RUBY" ]; then echo path; return; fi
+  if find_rbenv >/dev/null; then echo rbenv; return; fi
+  if has mise && ask_yn "You have mise. Use it for Ruby $REQ_RUBY (instead of installing rbenv)?" y; then echo mise; return; fi
+  if has asdf && ask_yn "You have asdf. Use it for Ruby $REQ_RUBY (instead of installing rbenv)?" y; then echo asdf; return; fi
+  echo rbenv
+}
+
+step_ruby() {
+  CURRENT_STEP="setting up Ruby"
+  step "2/8 Ruby $REQ_RUBY"
+
+  if { [ -d "$HOME/.rvm" ] || has rvm; } && [ "$FORCE_MANAGER" != path ]; then
+    warn "RVM is installed as well. It can fight rbenv over which Ruby runs; if ruby -v looks wrong later, that is the likely reason."
+  fi
+
+  # Already done on an earlier run?
+  if [ -z "$FORCE_MANAGER" ] && load_ruby_choice 2>/dev/null; then
+    local current
+    current=$(ruby_version_of rb ruby || true)
+    if [ -n "$current" ] && ruby_meets_minimum "$current"; then
+      ok "Ruby $current already installed ($KILN_RUBY_MANAGER, chosen on an earlier run)"
+      return 0
+    fi
+    warn "The Ruby chosen last time no longer works. Choosing again."
+  fi
+
+  local manager status
+  manager=$(pick_manager)
+  while true; do
+    status=0
+    case "$manager" in
+      path)
+        local current
+        current=$(ruby_version_of ruby || true)
+        if [ -n "$current" ] && ruby_meets_minimum "$current"; then
+          KILN_RUBY_DIR=$(ruby -e 'print RbConfig::CONFIG["bindir"]')
+          ok "Ruby $current already installed and on your PATH ($KILN_RUBY_DIR/ruby)"
+          KILN_RUBY_MANAGER=path; KILN_RUBY_VERSION=$current
+          break
+        fi
+        err "The ruby on your PATH is ${current:-missing}, and this app needs $MIN_RUBY or newer."
+        status=1
+        ;;
+      rbenv) install_ruby_rbenv "$REQ_RUBY" || status=$? ;;
+      mise) install_ruby_mise "$REQ_RUBY" || status=$? ;;
+      asdf) install_ruby_asdf "$REQ_RUBY" || status=$? ;;
+    esac
+    if [ "$status" = 0 ]; then
+      [ "$manager" = path ] || { KILN_RUBY_MANAGER=$manager; KILN_RUBY_VERSION=$REQ_RUBY; }
+      break
+    fi
+    status=0
+    ruby_fallback "$manager" || status=$?
+    [ "$status" = 2 ] && continue
+    break
+  done
+
+  activate_ruby "$KILN_RUBY_MANAGER" "$KILN_RUBY_VERSION" "${KILN_RUBY_DIR:-}" || die "Could not switch to Ruby $KILN_RUBY_VERSION."
+  local active
+  active=$(ruby_version_of rb ruby || true)
+  [ -n "$active" ] || die "Ruby $KILN_RUBY_VERSION was installed but will not run."
+  ruby_meets_minimum "$active" || die "Ruby $active is older than $MIN_RUBY."
+  save_ruby_choice
+  ok "Using Ruby $active ($KILN_RUBY_MANAGER)"
+}
+
+# ---- 3. Bundler -----------------------------------------------------------
+
+GEMS_NEED_LOCAL_PATH=0
+
+step_bundler() {
+  CURRENT_STEP="installing Bundler"
+  step "3/8 Bundler"
+  local locked gemdir
+  locked=$(awk '/^BUNDLED WITH/ { getline; gsub(/ /, ""); print }' Gemfile.lock)
+
+  gemdir=$(rb gem env gemdir 2>/dev/null || true)
+  if [ -n "$gemdir" ] && [ ! -w "$gemdir" ]; then
+    GEMS_NEED_LOCAL_PATH=1
+    info "This Ruby's gem folder is not writable ($gemdir), so gems will go in vendor/bundle."
+  fi
+
+  if [ -z "$locked" ]; then
+    ok "Bundler $(rb bundle -v 2>/dev/null | awk '{print $NF}') (Gemfile.lock does not pin one)"
+    return 0
+  fi
+  if rb gem list bundler -i -v "$locked" >/dev/null 2>&1; then
+    ok "Bundler $locked already installed"
+    return 0
+  fi
+  local user_flag=""
+  [ "$GEMS_NEED_LOCAL_PATH" = 1 ] && user_flag="--user-install"
+  # shellcheck disable=SC2086
+  if logged bundler rb gem install bundler -v "$locked" --no-document $user_flag; then
+    ok "Bundler $locked installed"
+    done_note "installed Bundler $locked"
+  else
+    warn "Could not install Bundler $locked. Carrying on: RubyGems switches to the locked version by itself when it can."
+  fi
+}
+
+# ---- 4. gems --------------------------------------------------------------
+
+step_gems() {
+  CURRENT_STEP="installing gems"
+  step "4/8 Gems"
+  if [ "$GEMS_NEED_LOCAL_PATH" = 1 ]; then
+    rb bundle config set --local path vendor/bundle >/dev/null
+  fi
+  if rb bundle check >/dev/null 2>&1; then
+    ok "All gems already installed"
+    return 0
+  fi
+  info "Running bundle install (a few minutes the first time)..."
+  if logged bundle-install rb bundle install --jobs 4 --retry 3; then
+    ok "Gems installed"
+    done_note "installed gems"
+    return 0
+  fi
+
+  warn "bundle install failed. The usual cause is a library a gem compiles against."
+  ensure_ruby_build_deps
+  if ask_yn "Try bundle install once more?" y; then
+    CURRENT_STEP="installing gems (second try)"
+    logged bundle-install-retry rb bundle install --jobs 4 --retry 3
+    ok "Gems installed"
+    done_note "installed gems (second try)"
+  else
+    die "Stopped. See log/setup/bundle-install.log."
+  fi
+}
+
+# ---- 5. database ----------------------------------------------------------
+
+step_database() {
+  CURRENT_STEP="preparing the databases"
+  step "5/8 Database"
+  has sqlite3 || info "(The sqlite3 command-line tool is not installed. The app does not need it; the gem brings SQLite with it.)"
+
+  if [ "$RESET_DB" = 1 ]; then
+    if ask_yn "Drop the development database and rebuild it from seeds?" n; then
+      logged db-reset rb bin/rails db:reset
+      ok "Development database rebuilt"
+      done_note "rebuilt the development database"
+    fi
+  fi
+
+  logged db-prepare rb bin/rails db:prepare
+  ok "Development database created and migrated"
+
+  if rb bin/rails runner 'exit(Kiln.exists? ? 0 : 1)' >/dev/null 2>&1; then
+    ok "Demo data already there"
+  else
+    logged db-seed rb bin/rails db:seed
+    ok "Demo data seeded"
+    done_note "seeded demo data"
+  fi
+
+  logged db-prepare-test rb env RAILS_ENV=test bin/rails db:prepare
+  ok "Test database ready"
+}
+
+# ---- 6. sample import -----------------------------------------------------
+
+step_sample() {
+  CURRENT_STEP="importing the sample class"
+  step "6/8 Sample Saturday class"
+  if [ "$NO_SAMPLE" = 1 ]; then
+    info "Skipped (--no-sample)."
+    return 0
+  fi
+  # The importer is not idempotent (that is one of the practice questions), so
+  # check before running it.
+  if rb bin/rails runner 'exit(Piece.exists?(title: "Pinch pot") ? 0 : 1)' >/dev/null 2>&1; then
+    ok "Sample class already imported"
+    return 0
+  fi
+  if ask_yn "Import db/sample/saturday_class.csv (four pieces and a new member)?" y; then
+    logged sample-import rb bin/rails "kiln:import[db/sample/saturday_class.csv]"
+    ok "$(tail -1 "$LOG_DIR/sample-import.log")"
+    done_note "imported the sample Saturday class"
+  fi
+}
+
+# ---- 7. tests -------------------------------------------------------------
+
+step_tests() {
+  CURRENT_STEP="running the specs"
+  step "7/8 Tests"
+  if [ "$SKIP_TESTS" = 1 ]; then
+    info "Skipped (--skip-tests)."
+    return 0
+  fi
+  if logged rspec rb bundle exec rspec; then
+    ok "$(grep -E '[0-9]+ examples?' "$LOG_DIR/rspec.log" | tail -1)"
+  else
+    warn "Some specs failed. On a fresh setup they should all pass, so this points at the environment."
+    warn "Details: log/setup/rspec.log"
+  fi
+}
+
+# ---- 8. editor ------------------------------------------------------------
+
+find_code() {
+  if has code; then command -v code; return; fi
+  local mac_code="/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
+  [ -x "$mac_code" ] && { echo "$mac_code"; return; }
+  return 1
+}
+
+step_editor() {
+  CURRENT_STEP="checking VS Code"
+  step "8/8 VS Code and Live Share"
+  if [ "$NO_EDITOR" = 1 ]; then
+    info "Skipped (--no-editor)."
+    return 0
+  fi
+  local code_bin
+  if ! code_bin=$(find_code); then
+    info "VS Code's 'code' command was not found. If VS Code is installed: Command Palette >"
+    info "'Shell Command: Install code command in PATH'. Then install the Live Share extension."
+    return 0
+  fi
+  if "$code_bin" --list-extensions 2>/dev/null | grep -qi '^ms-vsliveshare.vsliveshare$'; then
+    ok "Live Share extension already installed"
+  elif ask_yn "Install the Live Share extension in VS Code?" y; then
+    logged liveshare "$code_bin" --install-extension ms-vsliveshare.vsliveshare
+    ok "Live Share installed"
+    done_note "installed the Live Share extension"
+  fi
+}
+
+# ---- go ---------------------------------------------------------------------
+
+printf '%sKiln Queue setup%s (%s, wants Ruby %s)\n' "$C_BOLD" "$C_RESET" "$OS" "$REQ_RUBY"
+
+step_basics
+step_ruby
+step_bundler
+step_gems
+step_database
+step_sample
+step_tests
+step_editor
+
+CURRENT_STEP="finishing"
+step "Done"
+if [ -n "$SUMMARY" ]; then
+  info "This run:$SUMMARY"
+else
+  info "Everything was already in place. Nothing changed."
+fi
+echo
+info "Start the app:   ./dev"
+info "Run the specs:   bundle exec rspec"
+if [ "$KILN_RUBY_MANAGER" = rbenv ] || [ "$KILN_RUBY_MANAGER" = asdf ]; then
+  info "If ruby -v in an already-open terminal is not $KILN_RUBY_VERSION, open a new terminal."
+fi
