@@ -49,7 +49,7 @@ end
 # json 3.0 takes parser options as keywords only; ActiveSupport 8.1.3 still
 # passes a positional hash when it reads the flash cookie. Lift this pin once
 # Rails ships the fix.
-gem "json", "~> 2.10"
+gem "json", "~> 3.1"
 
 # CSV left Ruby's default gems in 3.4; the legacy importer needs it.
 gem "csv"
